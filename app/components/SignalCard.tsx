@@ -1,19 +1,21 @@
 "use client";
 
-import { WeeklySignal } from "@/app/lib/types";
+import { WeeklySignal, SensitivityResult } from "@/app/lib/types";
 import { inputs, outputs } from "@/app/data/inputs-outputs";
 import { RAGBadge } from "./RAGBadge";
 import { AbsoluteBadge } from "./AbsoluteBadge";
 import { StabilityIndicator } from "./StabilityIndicator";
+import { SensitivityGauge } from "./SensitivityGauge";
 import { Sparkline } from "./Sparkline";
 
 interface SignalCardProps {
   signal: WeeklySignal;
   priceHistory: { value: number }[];
+  sensitivity?: SensitivityResult;
   onClick: () => void;
 }
 
-export function SignalCard({ signal, priceHistory, onClick }: SignalCardProps) {
+export function SignalCard({ signal, priceHistory, sensitivity, onClick }: SignalCardProps) {
   const input = inputs.find((i) => i.id === signal.inputId);
   const output = outputs.find((o) => o.id === signal.outputId);
 
@@ -25,7 +27,6 @@ export function SignalCard({ signal, priceHistory, onClick }: SignalCardProps) {
     return `£${price.toFixed(0)}/t`;
   };
 
-  // Warning: green percentile but uneconomic absolute
   const conflictWarning =
     signal.ragSignal === "green" && signal.absoluteVerdict === "uneconomic";
 
@@ -71,15 +72,20 @@ export function SignalCard({ signal, priceHistory, onClick }: SignalCardProps) {
         </div>
       </div>
 
-      <div className="mb-2">
-        <Sparkline
-          data={priceHistory.slice(-52)}
-          color={
-            signal.ragSignal === "green" ? "#16a34a" :
-            signal.ragSignal === "red" ? "#dc2626" :
-            signal.ragSignal === "amber" ? "#d97706" : "#9ca3af"
-          }
-        />
+      <div className="flex items-center gap-2 mb-2">
+        <div className="flex-1">
+          <Sparkline
+            data={priceHistory.slice(-52)}
+            color={
+              signal.ragSignal === "green" ? "#16a34a" :
+              signal.ragSignal === "red" ? "#dc2626" :
+              signal.ragSignal === "amber" ? "#d97706" : "#9ca3af"
+            }
+          />
+        </div>
+        {sensitivity && (
+          <SensitivityGauge result={sensitivity} compact />
+        )}
       </div>
 
       {conflictWarning && (

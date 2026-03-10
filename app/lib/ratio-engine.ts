@@ -7,6 +7,8 @@ import {
   AbsoluteVerdict,
   ShockScenario,
   ShockedSignal,
+  SensitivityResult,
+  RobustnessScore,
 } from "./types";
 import { inputs } from "@/app/data/inputs-outputs";
 
@@ -38,9 +40,16 @@ function getAllPricesUpTo(
 function calculateRatio(
   mapping: FarmInputMapping,
   inputPrice: number,
-  outputPrice: number
+  outputPrice: number,
+  conversionOverride?: number
 ): number {
-  return (inputPrice * mapping.conversionFactor) / outputPrice;
+  const cf = conversionOverride ?? mapping.conversionFactor;
+  // Substitution credit: net input cost = input price - forage value saved
+  let netInputPrice = inputPrice;
+  if (mapping.substitutionFactor && mapping.substitutionValuePerUnit) {
+    netInputPrice = Math.max(0, inputPrice - mapping.substitutionFactor * mapping.substitutionValuePerUnit);
+  }
+  return (netInputPrice * cf) / outputPrice;
 }
 
 function percentileRank(value: number, distribution: number[]): number {
@@ -452,4 +461,228 @@ export function getAvailableWeeks(prices: PriceSeries[]): string[] {
   const first = prices[0];
   if (!first) return [];
   return first.prices.map((p) => p.weekStart);
+}
+
+// ── Sensitivity testing (Phase 3) ──
+
+export function sensitivityTest(
+  farm: FarmProfile,
+  mapping: FarmInputMapping,
+  prices: PriceSeries[],
+  weekStart: string,
+  windowWeeks: number = 156
+): SensitivityResult {
+  const inputPrice = getPrice(prices, mapping.inputId, weekStart);
+  const outputPrice = getPrice(prices, mapping.outputId, weekStart);
+  const inSeason = isInSeason(mapping, weekStart);
+
+  const factors = [0.8, 0.9, 1.0, 1.1, 1.2];
+  const sweepResults: SensitivityResult["sweepResults"] = [];
+
+  // Build historical ratios at base conversion factor for percentile context
+  const historicalInputPrices = getAllPricesUpTo(prices, mapping.inputId, weekStart, windowWeeks);
+  const historicalOutputPrices = getAllPricesUpTo(prices, mapping.outputId, weekStart, windowWeeks);
+  const minLen = Math.min(historicalInputPrices.length, historicalOutputPrices.length);
+
+  for (const mult of factors) {
+    const cf = mapping.conversionFactor * mult;
+    if (!inputPrice || !outputPrice) {
+      sweepResults.push({ factor: mult, ratio: 0, percentile: 50, rag: "grey" });
+      continue;
+    }
+
+    const ratio = calculateRatio(mapping, inputPrice, outputPrice, cf);
+
+    // Recalculate historical ratios at this conversion factor
+    const histRatios: number[] = [];
+    for (let i = 0; i < minLen; i++) {
+      histRatios.push(calculateRatio(mapping, historicalInputPrices[i], historicalOutputPrices[i], cf));
+    }
+
+    const pct = percentileRank(ratio, histRatios);
+    const rag: RAGSignal = inSeason ? assignRAG(pct) : "grey";
+
+    sweepResults.push({
+      factor: mult,
+      ratio: Math.round(ratio * 1000) / 1000,
+      percentile: Math.round(pct),
+      rag,
+    });
+  }
+
+  const activeRags = sweepResults.filter((r) => r.rag !== "grey").map((r) => r.rag);
+  const uniqueRags = new Set(activeRags);
+  const signalChanges = uniqueRags.size > 1;
+
+  let sensitivity: SensitivityResult["sensitivity"] = "low";
+  if (signalChanges) {
+    // Check if it changes within ±10% (tighter range = higher sensitivity)
+    const tightRags = sweepResults
+      .filter((r) => r.factor >= 0.9 && r.factor <= 1.1 && r.rag !== "grey")
+      .map((r) => r.rag);
+    const tightUnique = new Set(tightRags);
+    sensitivity = tightUnique.size > 1 ? "high" : "medium";
+  }
+
+  return {
+    inputId: mapping.inputId,
+    sensitivity,
+    sweepResults,
+    signalChanges,
+  };
+}
+
+// ── Cross-farm comparison (Phase 5) ──
+
+export interface CrossFarmCell {
+  farmId: string;
+  farmName: string;
+  signal: WeeklySignal | null;
+}
+
+export interface CrossFarmRow {
+  inputId: string;
+  inputName: string;
+  cells: CrossFarmCell[];
+}
+
+export function buildCrossFarmComparison(
+  farms: FarmProfile[],
+  prices: PriceSeries[],
+  weekStart: string
+): CrossFarmRow[] {
+  // Find all unique input IDs across all farms
+  const allInputIds = new Set<string>();
+  for (const farm of farms) {
+    for (const m of farm.inputMappings) {
+      allInputIds.add(m.inputId);
+    }
+  }
+
+  // For each input, compute signals on every farm that uses it
+  const signalsByFarm = new Map<string, WeeklySignal[]>();
+  for (const farm of farms) {
+    signalsByFarm.set(farm.id, calculateWeeklySignals(farm, prices, weekStart));
+  }
+
+  const rows: CrossFarmRow[] = [];
+  for (const inputId of allInputIds) {
+    // Only include inputs used by 2+ farms
+    const farmsUsingInput = farms.filter((f) => f.inputMappings.some((m) => m.inputId === inputId));
+    if (farmsUsingInput.length < 2) continue;
+
+    const inputDef = inputs.find((i) => i.id === inputId);
+    const cells: CrossFarmCell[] = farms.map((farm) => {
+      const farmSignals = signalsByFarm.get(farm.id) ?? [];
+      const signal = farmSignals.find((s) => s.inputId === inputId) ?? null;
+      return { farmId: farm.id, farmName: farm.name, signal };
+    });
+
+    rows.push({
+      inputId,
+      inputName: inputDef?.name ?? inputId,
+      cells,
+    });
+  }
+
+  // Also include single-farm inputs for completeness
+  for (const inputId of allInputIds) {
+    if (rows.some((r) => r.inputId === inputId)) continue;
+    const inputDef = inputs.find((i) => i.id === inputId);
+    const cells: CrossFarmCell[] = farms.map((farm) => {
+      const farmSignals = signalsByFarm.get(farm.id) ?? [];
+      const signal = farmSignals.find((s) => s.inputId === inputId) ?? null;
+      return { farmId: farm.id, farmName: farm.name, signal };
+    });
+    rows.push({
+      inputId,
+      inputName: inputDef?.name ?? inputId,
+      cells,
+    });
+  }
+
+  return rows;
+}
+
+// ── Robustness profile (Phase 7) ──
+
+export function computeRobustness(
+  farm: FarmProfile,
+  prices: PriceSeries[],
+  weekStart: string,
+  signals: WeeklySignal[],
+  sensitivities: SensitivityResult[]
+): RobustnessScore {
+  const inSeasonSignals = signals.filter((s) => s.ragSignal !== "grey");
+  const ragOrder: Record<RAGSignal, number> = { green: 0, amber: 1, red: 2, grey: -1 };
+
+  // 1. Shock survival: run all scenarios, count fraction where no signal worsens
+  let scenariosWithoutWorsening = 0;
+  for (const scenario of shockScenarios) {
+    const shockedPrices = applyPriceShock(prices, scenario.shocks, weekStart);
+    const shockedSignals = calculateWeeklySignals(farm, shockedPrices, weekStart);
+    const anyWorsened = shockedSignals.some((shocked) => {
+      const baseline = signals.find((b) => b.inputId === shocked.inputId);
+      if (!baseline || baseline.ragSignal === "grey") return false;
+      return ragOrder[shocked.ragSignal] > ragOrder[baseline.ragSignal];
+    });
+    if (!anyWorsened) scenariosWithoutWorsening++;
+  }
+  const shockSurvival = shockScenarios.length > 0
+    ? Math.round((scenariosWithoutWorsening / shockScenarios.length) * 100)
+    : 100;
+
+  // 2. Signal stability: average stability weeks, normalised to 0-100 (12+ weeks = 100)
+  const avgStability = inSeasonSignals.length > 0
+    ? inSeasonSignals.reduce((sum, s) => sum + s.stabilityWeeks, 0) / inSeasonSignals.length
+    : 0;
+  const signalStability = Math.min(100, Math.round((avgStability / 12) * 100));
+
+  // 3. Sensitivity resilience: fraction of signals with low sensitivity
+  const lowSensCount = sensitivities.filter((s) => s.sensitivity === "low").length;
+  const sensitivityResilience = sensitivities.length > 0
+    ? Math.round((lowSensCount / sensitivities.length) * 100)
+    : 100;
+
+  // 4. Absolute health: fraction of in-season signals that are profitable
+  const profitableCount = inSeasonSignals.filter((s) => s.absoluteVerdict === "profitable").length;
+  const absoluteHealth = inSeasonSignals.length > 0
+    ? Math.round((profitableCount / inSeasonSignals.length) * 100)
+    : 0;
+
+  // 5. Seasonal coverage: fraction of inputs currently in season
+  const seasonalCoverage = signals.length > 0
+    ? Math.round((inSeasonSignals.length / signals.length) * 100)
+    : 0;
+
+  // Weighted composite
+  const overall = Math.round(
+    shockSurvival * 0.3 +
+    signalStability * 0.2 +
+    sensitivityResilience * 0.2 +
+    absoluteHealth * 0.2 +
+    seasonalCoverage * 0.1
+  );
+
+  // Fragility flags
+  const fragility: string[] = [];
+  if (shockSurvival < 40) fragility.push("Most signals break under shocks");
+  if (signalStability < 30) fragility.push("Signals are unstable (recent flips)");
+  if (sensitivityResilience < 40) fragility.push("Signals sensitive to conversion factor assumptions");
+  if (absoluteHealth < 30) fragility.push("Most inputs above break-even at benchmark rates");
+  if (seasonalCoverage < 30) fragility.push("Most inputs out of season");
+  const redCount = inSeasonSignals.filter((s) => s.ragSignal === "red").length;
+  if (redCount > inSeasonSignals.length / 2) fragility.push("Majority of in-season inputs are red");
+
+  return {
+    overall,
+    components: {
+      shockSurvival,
+      signalStability,
+      sensitivityResilience,
+      absoluteHealth,
+      seasonalCoverage,
+    },
+    fragility,
+  };
 }

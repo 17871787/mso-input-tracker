@@ -25,6 +25,8 @@ export interface FarmInputMapping {
   feedGapEndMonth?: number;
   applicationWindowStart?: number; // for fertiliser
   applicationWindowEnd?: number;
+  substitutionFactor?: number; // kg forage DM displaced per unit input
+  substitutionValuePerUnit?: number; // £ value of displaced forage per unit
 }
 
 export interface FarmProfile {
@@ -90,4 +92,23 @@ export interface ShockedSignal {
   shockedRatio: number;
   ragChanged: boolean;
   worsened: boolean;
+}
+
+export interface SensitivityResult {
+  inputId: string;
+  sensitivity: "low" | "medium" | "high";
+  sweepResults: { factor: number; ratio: number; percentile: number; rag: RAGSignal }[];
+  signalChanges: boolean; // does RAG flip within ±20% of conversion factor?
+}
+
+export interface RobustnessScore {
+  overall: number; // 0-100
+  components: {
+    shockSurvival: number; // 0-100: fraction of shock scenarios where no signal worsens
+    signalStability: number; // 0-100: average stability weeks normalised
+    sensitivityResilience: number; // 0-100: fraction of signals with low sensitivity
+    absoluteHealth: number; // 0-100: fraction of in-season signals that are profitable
+    seasonalCoverage: number; // 0-100: fraction of inputs currently in season
+  };
+  fragility: string[];
 }

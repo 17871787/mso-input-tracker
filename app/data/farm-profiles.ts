@@ -95,25 +95,31 @@ export const farmProfiles: FarmProfile[] = [
         inputId: "feed_wheat",
         outputId: "milk_litre",
         conversionFactor: 0.56, // 1kg compound ≈ 1.8L milk response; wheat component
-        conversionNote: "Energy component of TMR. 1kg high-energy cake (£350/t) produces ~1.8L milk at peak.",
+        conversionNote: "Energy component of TMR. 1kg high-energy cake (£350/t) produces ~1.8L milk at peak. Net cost includes forage substitution credit.",
         feedGapStartMonth: 11,
         feedGapEndMonth: 4,
+        substitutionFactor: 0.6, // 0.6 kg DM forage displaced per kg concentrate eaten
+        substitutionValuePerUnit: 0.16, // £0.16/kg DM (£160/t DM pasture transfer price)
       },
       {
         inputId: "soya_hp",
         outputId: "milk_litre",
         conversionFactor: 0.4, // protein concentrate, lower volume but critical
-        conversionNote: "0.25kg soya DCP ≈ 0.1L milk protein response. Highly variable by forage quality.",
+        conversionNote: "0.25kg soya DCP ≈ 0.1L milk protein response. Highly variable by forage quality. Net cost includes forage substitution credit.",
         feedGapStartMonth: 11,
         feedGapEndMonth: 4,
+        substitutionFactor: 0.4, // lower substitution for protein — less forage displacement
+        substitutionValuePerUnit: 0.16,
       },
       {
         inputId: "rapeseed_meal",
         outputId: "milk_litre",
         conversionFactor: 0.45,
-        conversionNote: "Alternative protein to soya. Lower protein content but UK-sourced.",
+        conversionNote: "Alternative protein to soya. Lower protein content but UK-sourced. Net cost includes forage substitution credit.",
         feedGapStartMonth: 11,
         feedGapEndMonth: 4,
+        substitutionFactor: 0.45,
+        substitutionValuePerUnit: 0.16,
       },
       {
         inputId: "an_fertiliser",
