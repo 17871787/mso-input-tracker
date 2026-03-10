@@ -3,6 +3,8 @@
 import { WeeklySignal } from "@/app/lib/types";
 import { inputs, outputs } from "@/app/data/inputs-outputs";
 import { RAGBadge } from "./RAGBadge";
+import { AbsoluteBadge } from "./AbsoluteBadge";
+import { StabilityIndicator } from "./StabilityIndicator";
 import { Sparkline } from "./Sparkline";
 
 interface SignalCardProps {
@@ -23,51 +25,71 @@ export function SignalCard({ signal, priceHistory, onClick }: SignalCardProps) {
     return `£${price.toFixed(0)}/t`;
   };
 
+  // Warning: green percentile but uneconomic absolute
+  const conflictWarning =
+    signal.ragSignal === "green" && signal.absoluteVerdict === "uneconomic";
+
   return (
     <button
       onClick={onClick}
-      className="w-full text-left bg-card border border-border rounded-xl p-4 hover:shadow-md transition-shadow cursor-pointer"
+      className={`w-full text-left bg-card border rounded-xl p-4 hover:shadow-md transition-shadow cursor-pointer ${
+        conflictWarning ? "border-amber-signal" : "border-border"
+      }`}
     >
       <div className="flex items-start justify-between gap-3 mb-3">
         <div className="min-w-0">
           <h3 className="font-semibold text-sm truncate">{input.name}</h3>
           <p className="text-xs text-muted mt-0.5">vs {output?.name}</p>
         </div>
-        <RAGBadge signal={signal.ragSignal} size="sm" />
+        <div className="flex flex-col items-end gap-1">
+          <RAGBadge signal={signal.ragSignal} size="sm" />
+          <AbsoluteBadge verdict={signal.absoluteVerdict} />
+        </div>
       </div>
 
-      <div className="grid grid-cols-2 gap-3 mb-3">
+      <div className="grid grid-cols-3 gap-2 mb-3">
         <div>
-          <p className="text-xs text-muted">Current price</p>
-          <p className="text-lg font-bold">{formatPrice(signal.currentInputPrice, input.unit)}</p>
+          <p className="text-xs text-muted">Price</p>
+          <p className="text-base font-bold">{formatPrice(signal.currentInputPrice, input.unit)}</p>
         </div>
         <div>
           <p className="text-xs text-muted">Ratio</p>
-          <p className="text-lg font-bold">{signal.ratioValue.toFixed(2)}</p>
+          <p className="text-base font-bold">{signal.ratioValue.toFixed(2)}</p>
+        </div>
+        <div>
+          <p className="text-xs text-muted">%ile</p>
+          <div className="flex items-center gap-1">
+            <p className="text-base font-bold">
+              {signal.ragSignal === "grey" ? "—" : `${signal.percentileRank}%`}
+            </p>
+            <StabilityIndicator
+              weeks={signal.stabilityWeeks}
+              trend={signal.trendDirection}
+              signal={signal.ragSignal}
+            />
+          </div>
         </div>
       </div>
 
-      <div className="flex items-center gap-3">
-        <div className="flex-1">
-          <Sparkline
-            data={priceHistory.slice(-52)}
-            color={
-              signal.ragSignal === "green" ? "#16a34a" :
-              signal.ragSignal === "red" ? "#dc2626" :
-              signal.ragSignal === "amber" ? "#d97706" : "#9ca3af"
-            }
-          />
-        </div>
-        <div className="text-right">
-          <p className="text-xs text-muted">Percentile</p>
-          <p className="text-sm font-semibold">
-            {signal.ragSignal === "grey" ? "—" : `${signal.percentileRank}%`}
-          </p>
-        </div>
+      <div className="mb-2">
+        <Sparkline
+          data={priceHistory.slice(-52)}
+          color={
+            signal.ragSignal === "green" ? "#16a34a" :
+            signal.ragSignal === "red" ? "#dc2626" :
+            signal.ragSignal === "amber" ? "#d97706" : "#9ca3af"
+          }
+        />
       </div>
+
+      {conflictWarning && (
+        <p className="text-[10px] text-amber-signal font-semibold mt-1">
+          ⚠ Historically cheap but still above break-even
+        </p>
+      )}
 
       {!signal.inSeasonGate && (
-        <p className="text-xs text-muted mt-2 italic">
+        <p className="text-xs text-muted mt-1 italic">
           Out of season — signal suppressed
         </p>
       )}

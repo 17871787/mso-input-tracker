@@ -1,5 +1,16 @@
-import { FarmProfile, FarmInputMapping, PriceSeries, WeeklySignal, RAGSignal, FarmWeeklySummary } from "./types";
+import {
+  FarmProfile,
+  FarmInputMapping,
+  PriceSeries,
+  WeeklySignal,
+  RAGSignal,
+  AbsoluteVerdict,
+  ShockScenario,
+  ShockedSignal,
+} from "./types";
 import { inputs } from "@/app/data/inputs-outputs";
+
+// ── Price helpers ──
 
 function getPrice(series: PriceSeries[], id: string, weekStart: string): number | null {
   const s = series.find((s) => s.id === id);
@@ -8,7 +19,12 @@ function getPrice(series: PriceSeries[], id: string, weekStart: string): number 
   return p ? p.price : null;
 }
 
-function getAllPricesUpTo(series: PriceSeries[], id: string, weekStart: string, windowWeeks: number): number[] {
+function getAllPricesUpTo(
+  series: PriceSeries[],
+  id: string,
+  weekStart: string,
+  windowWeeks: number
+): number[] {
   const s = series.find((s) => s.id === id);
   if (!s) return [];
   const weekIdx = s.prices.findIndex((p) => p.weekStart === weekStart);
@@ -17,13 +33,13 @@ function getAllPricesUpTo(series: PriceSeries[], id: string, weekStart: string, 
   return s.prices.slice(start, weekIdx + 1).map((p) => p.price);
 }
 
+// ── Core calculations ──
+
 function calculateRatio(
   mapping: FarmInputMapping,
   inputPrice: number,
   outputPrice: number
 ): number {
-  // Ratio = (input cost to produce one unit of output) / (output price per unit)
-  // Higher ratio = input is more expensive relative to output = worse deal
   return (inputPrice * mapping.conversionFactor) / outputPrice;
 }
 
@@ -44,8 +60,14 @@ function assignRAG(percentile: number): RAGSignal {
   return "red";
 }
 
+function assignAbsoluteVerdict(ratio: number): AbsoluteVerdict {
+  if (ratio < 1.0) return "profitable";
+  if (ratio <= 1.2) return "marginal";
+  return "uneconomic";
+}
+
 function isInSeason(mapping: FarmInputMapping, weekStart: string): boolean {
-  const month = new Date(weekStart).getMonth() + 1; // 1-12
+  const month = new Date(weekStart).getMonth() + 1;
 
   const inputDef = inputs.find((i) => i.id === mapping.inputId);
   const isFertiliser = inputDef?.category === "fertiliser";
@@ -59,11 +81,89 @@ function isInSeason(mapping: FarmInputMapping, weekStart: string): boolean {
   } else {
     const start = mapping.feedGapStartMonth;
     const end = mapping.feedGapEndMonth;
-    if (!start || !end) return true; // year-round
+    if (!start || !end) return true;
     if (start <= end) return month >= start && month <= end;
-    return month >= start || month <= end; // wraps around year
+    return month >= start || month <= end;
   }
 }
+
+// ── Stability & trend ──
+
+function getWeeksBefore(
+  series: PriceSeries[],
+  weekStart: string,
+  count: number
+): string[] {
+  const anySeries = series[0];
+  if (!anySeries) return [];
+  const idx = anySeries.prices.findIndex((p) => p.weekStart === weekStart);
+  if (idx < 0) return [];
+  const result: string[] = [];
+  for (let i = Math.max(0, idx - count); i < idx; i++) {
+    result.push(anySeries.prices[i].weekStart);
+  }
+  return result;
+}
+
+function computeStabilityAndTrend(
+  farm: FarmProfile,
+  mapping: FarmInputMapping,
+  prices: PriceSeries[],
+  weekStart: string,
+  currentRag: RAGSignal,
+  windowWeeks: number = 156
+): { stabilityWeeks: number; trendDirection: "improving" | "worsening" | "stable" } {
+  const prevWeeks = getWeeksBefore(prices, weekStart, 52);
+
+  // Stability: count consecutive weeks with same RAG going backwards
+  let stabilityWeeks = 1;
+  for (let i = prevWeeks.length - 1; i >= 0; i--) {
+    const wk = prevWeeks[i];
+    const ip = getPrice(prices, mapping.inputId, wk);
+    const op = getPrice(prices, mapping.outputId, wk);
+    if (!ip || !op) break;
+
+    const ratio = calculateRatio(mapping, ip, op);
+    const histInput = getAllPricesUpTo(prices, mapping.inputId, wk, windowWeeks);
+    const histOutput = getAllPricesUpTo(prices, mapping.outputId, wk, windowWeeks);
+    const minLen = Math.min(histInput.length, histOutput.length);
+    const histRatios: number[] = [];
+    for (let j = 0; j < minLen; j++) {
+      histRatios.push(calculateRatio(mapping, histInput[j], histOutput[j]));
+    }
+    const pct = percentileRank(ratio, histRatios);
+    const inSeason = isInSeason(mapping, wk);
+    const rag = inSeason ? assignRAG(pct) : "grey";
+
+    if (rag === currentRag) {
+      stabilityWeeks++;
+    } else {
+      break;
+    }
+  }
+
+  // Trend: compare current percentile to 4 weeks ago
+  let trendDirection: "improving" | "worsening" | "stable" = "stable";
+  if (prevWeeks.length >= 4) {
+    const fourWeeksAgo = prevWeeks[prevWeeks.length - 4];
+    const ip4 = getPrice(prices, mapping.inputId, fourWeeksAgo);
+    const op4 = getPrice(prices, mapping.outputId, fourWeeksAgo);
+    const ipNow = getPrice(prices, mapping.inputId, weekStart);
+    const opNow = getPrice(prices, mapping.outputId, weekStart);
+    if (ip4 && op4 && ipNow && opNow) {
+      const ratioNow = calculateRatio(mapping, ipNow, opNow);
+      const ratio4 = calculateRatio(mapping, ip4, op4);
+      const diff = ratioNow - ratio4;
+      const threshold = ratio4 * 0.03; // 3% change = meaningful
+      if (diff < -threshold) trendDirection = "improving";
+      else if (diff > threshold) trendDirection = "worsening";
+    }
+  }
+
+  return { stabilityWeeks, trendDirection };
+}
+
+// ── Main signal calculation ──
 
 export function calculateWeeklySignals(
   farm: FarmProfile,
@@ -85,15 +185,17 @@ export function calculateWeeklySignals(
         ratioValue: 0,
         percentileRank: 50,
         ragSignal: "grey" as RAGSignal,
+        absoluteVerdict: "uneconomic" as AbsoluteVerdict,
         inSeasonGate: inSeason,
         currentInputPrice: inputPrice ?? 0,
         currentOutputPrice: outputPrice ?? 0,
+        stabilityWeeks: 0,
+        trendDirection: "stable" as const,
       };
     }
 
     const currentRatio = calculateRatio(mapping, inputPrice, outputPrice);
 
-    // Build historical ratios
     const historicalInputPrices = getAllPricesUpTo(prices, mapping.inputId, weekStart, windowWeeks);
     const historicalOutputPrices = getAllPricesUpTo(prices, mapping.outputId, weekStart, windowWeeks);
     const minLen = Math.min(historicalInputPrices.length, historicalOutputPrices.length);
@@ -104,6 +206,16 @@ export function calculateWeeklySignals(
 
     const pctRank = percentileRank(currentRatio, historicalRatios);
     const rag: RAGSignal = inSeason ? assignRAG(pctRank) : "grey";
+    const absVerdict = assignAbsoluteVerdict(currentRatio);
+
+    const { stabilityWeeks, trendDirection } = computeStabilityAndTrend(
+      farm,
+      mapping,
+      prices,
+      weekStart,
+      rag,
+      windowWeeks
+    );
 
     return {
       farmId: farm.id,
@@ -113,12 +225,17 @@ export function calculateWeeklySignals(
       ratioValue: Math.round(currentRatio * 1000) / 1000,
       percentileRank: Math.round(pctRank),
       ragSignal: rag,
+      absoluteVerdict: absVerdict,
       inSeasonGate: inSeason,
       currentInputPrice: inputPrice,
       currentOutputPrice: outputPrice,
+      stabilityWeeks,
+      trendDirection,
     };
   });
 }
+
+// ── Summary ──
 
 export function generateFarmSummary(
   farm: FarmProfile,
@@ -148,14 +265,23 @@ export function generateFarmSummary(
     parts.push(`${greys.length} input${greys.length > 1 ? "s" : ""} out of season`);
   }
 
+  // Add warnings for green-but-uneconomic
+  const greenButBad = greens.filter((s) => s.absoluteVerdict === "uneconomic");
+  if (greenButBad.length > 0) {
+    const names = greenButBad.map((s) => getName(s.inputId)).join(", ");
+    parts.push(`Note: ${names} ${greenButBad.length === 1 ? "is" : "are"} historically cheap but still above break-even`);
+  }
+
   if (parts.length === 0) return `${farm.name}: all inputs are out of season.`;
   return `${farm.name}: ${parts.join(". ")}.`;
 }
 
+// ── Historical ratios ──
+
 export function getHistoricalRatios(
   farm: FarmProfile,
   mapping: FarmInputMapping,
-  prices: PriceSeries[],
+  prices: PriceSeries[]
 ): { weekStart: string; ratio: number; percentile: number; rag: RAGSignal }[] {
   const inputSeries = prices.find((s) => s.id === mapping.inputId);
   const outputSeries = prices.find((s) => s.id === mapping.outputId);
@@ -172,7 +298,6 @@ export function getHistoricalRatios(
 
     const ratio = calculateRatio(mapping, inputPrice, outputPrice);
 
-    // Historical window up to this point
     const windowStart = Math.max(0, i - 155);
     const historicalRatios: number[] = [];
     for (let j = windowStart; j <= i; j++) {
@@ -193,4 +318,138 @@ export function getHistoricalRatios(
   }
 
   return result;
+}
+
+// ── Shock testing ──
+
+export function applyPriceShock(
+  prices: PriceSeries[],
+  shocks: Record<string, number>,
+  weekStart: string
+): PriceSeries[] {
+  return prices.map((series) => {
+    const multiplier = shocks[series.id];
+    if (!multiplier || multiplier === 1) return series;
+
+    return {
+      ...series,
+      prices: series.prices.map((p) => {
+        if (p.weekStart === weekStart) {
+          return { ...p, price: Math.round(p.price * multiplier * 100) / 100 };
+        }
+        return p;
+      }),
+    };
+  });
+}
+
+export const shockScenarios: ShockScenario[] = [
+  {
+    id: "output_down",
+    name: "Output −15%",
+    description: "All output commodity prices drop 15%",
+    shocks: {
+      cattle_dw: 0.85,
+      store_cattle: 0.85,
+      lamb_dw: 0.85,
+      milk_litre: 0.85,
+      wheat_exfarm: 0.85,
+      osr_exfarm: 0.85,
+    },
+  },
+  {
+    id: "inputs_up",
+    name: "Inputs +25%",
+    description: "All input costs rise 25%",
+    shocks: {
+      an_fertiliser: 1.25,
+      urea: 1.25,
+      feed_wheat: 1.25,
+      feed_barley: 1.25,
+      soya_hp: 1.25,
+      rapeseed_meal: 1.25,
+      hay_bale: 1.25,
+      straw_bale: 1.25,
+    },
+  },
+  {
+    id: "fert_spike",
+    name: "Fertiliser +50%",
+    description: "AN and urea spike 50% (2022-style)",
+    shocks: {
+      an_fertiliser: 1.5,
+      urea: 1.5,
+    },
+  },
+  {
+    id: "feed_squeeze",
+    name: "Feed +30%",
+    description: "All feed inputs rise 30%",
+    shocks: {
+      feed_wheat: 1.3,
+      feed_barley: 1.3,
+      soya_hp: 1.3,
+      rapeseed_meal: 1.3,
+      hay_bale: 1.3,
+      straw_bale: 1.3,
+    },
+  },
+  {
+    id: "two_hit",
+    name: "Two-hit",
+    description: "Inputs +25% AND output −10%",
+    shocks: {
+      an_fertiliser: 1.25,
+      urea: 1.25,
+      feed_wheat: 1.25,
+      feed_barley: 1.25,
+      soya_hp: 1.25,
+      rapeseed_meal: 1.25,
+      hay_bale: 1.25,
+      straw_bale: 1.25,
+      cattle_dw: 0.9,
+      store_cattle: 0.9,
+      lamb_dw: 0.9,
+      milk_litre: 0.9,
+      wheat_exfarm: 0.9,
+      osr_exfarm: 0.9,
+    },
+  },
+];
+
+export function runShockTest(
+  farm: FarmProfile,
+  prices: PriceSeries[],
+  weekStart: string,
+  scenario: ShockScenario,
+  baselineSignals: WeeklySignal[]
+): ShockedSignal[] {
+  const shockedPrices = applyPriceShock(prices, scenario.shocks, weekStart);
+  const shockedSignals = calculateWeeklySignals(farm, shockedPrices, weekStart);
+
+  return shockedSignals.map((shocked) => {
+    const baseline = baselineSignals.find((b) => b.inputId === shocked.inputId);
+    const baseRag = baseline?.ragSignal ?? "grey";
+    const ragOrder: Record<RAGSignal, number> = { green: 0, amber: 1, red: 2, grey: -1 };
+
+    return {
+      scenarioId: scenario.id,
+      scenarioName: scenario.name,
+      inputId: shocked.inputId,
+      baselineRag: baseRag,
+      shockedRag: shocked.ragSignal,
+      baselineRatio: baseline?.ratioValue ?? 0,
+      shockedRatio: shocked.ratioValue,
+      ragChanged: baseRag !== shocked.ragSignal,
+      worsened: ragOrder[shocked.ragSignal] > ragOrder[baseRag],
+    };
+  });
+}
+
+// ── Week navigation helpers ──
+
+export function getAvailableWeeks(prices: PriceSeries[]): string[] {
+  const first = prices[0];
+  if (!first) return [];
+  return first.prices.map((p) => p.weekStart);
 }

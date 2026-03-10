@@ -1,5 +1,7 @@
 export type RAGSignal = "green" | "amber" | "red" | "grey";
 
+export type AbsoluteVerdict = "profitable" | "marginal" | "uneconomic";
+
 export interface InputDef {
   id: string;
   name: string;
@@ -18,6 +20,7 @@ export interface FarmInputMapping {
   outputId: string;
   conversionFactor: number;
   conversionNote: string;
+  breakEvenNote?: string;
   feedGapStartMonth?: number; // 1-12, undefined = year-round
   feedGapEndMonth?: number;
   applicationWindowStart?: number; // for fertiliser
@@ -54,9 +57,12 @@ export interface WeeklySignal {
   ratioValue: number;
   percentileRank: number;
   ragSignal: RAGSignal;
+  absoluteVerdict: AbsoluteVerdict;
   inSeasonGate: boolean;
   currentInputPrice: number;
   currentOutputPrice: number;
+  stabilityWeeks: number;
+  trendDirection: "improving" | "worsening" | "stable";
 }
 
 export interface FarmWeeklySummary {
@@ -65,4 +71,23 @@ export interface FarmWeeklySummary {
   weekStart: string;
   signals: WeeklySignal[];
   summary: string;
+}
+
+export interface ShockScenario {
+  id: string;
+  name: string;
+  description: string;
+  shocks: Record<string, number>; // price series id → multiplier
+}
+
+export interface ShockedSignal {
+  scenarioId: string;
+  scenarioName: string;
+  inputId: string;
+  baselineRag: RAGSignal;
+  shockedRag: RAGSignal;
+  baselineRatio: number;
+  shockedRatio: number;
+  ragChanged: boolean;
+  worsened: boolean;
 }
